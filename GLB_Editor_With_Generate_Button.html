@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>GLB Viewer — Smooth, Snap & Export</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0f1c; font-family: 'Inter', system-ui, sans-serif;
+            color: #eef2ff; overflow: hidden; height: 100vh; display: flex; flex-direction: column;
+        }
+        .toolbar {
+            padding: 0.55rem 0.75rem; background: #111827cc; backdrop-filter: blur(10px);
+            border-bottom: 1px solid #1e293b; z-index: 20; display: flex; align-items: center;
+            justify-content: center; gap: 0.4rem; flex-wrap: wrap;
+        }
+        .btn {
+            background: #1e293b; border: 1px solid #334155; color: white; font-weight: 600;
+            padding: 0.38rem 0.7rem; border-radius: 0.45rem; cursor: pointer; font-size: 0.7rem;
+            transition: 0.2s; white-space: nowrap; user-select: none; letter-spacing: -0.01em;
+        }
+        .btn:hover { background: #273348; border-color: #475569; }
+        .btn.primary { background: #2563eb; border-color: #3b82f6; }
+        .btn.primary:hover { background: #1d4ed8; }
+        .btn.active { background: #10b981; border-color: #059669; box-shadow: 0 0 8px rgba(16, 185, 129, 0.35); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+        .btn.smooth-btn { background: #0d9488; border-color: #14b8a6; }
+        .btn.export-btn { background: #8b5cf6; border-color: #7c3aed; }
+        
+        .tool-panel {
+            display: none; align-items: center; gap: 0.4rem; background: #0f172a;
+            padding: 0.35rem 0.6rem; border-radius: 0.45rem; border: 1px solid #334155;
+        }
+        .slider-group {
+            display: flex; flex-direction: column; align-items: center; font-size: 0.62rem;
+            color: #cbd5e1; gap: 0.06rem; min-width: 48px;
+        }
+        .slider-group label { white-space: nowrap; font-weight: 500; font-size: 0.6rem; }
+        input[type="range"] { width: 58px; accent-color: #10b981; cursor: pointer; }
+        #file-input { display: none; }
+        .status {
+            font-size: 0.68rem; color: #94a3b8; width: 100%; text-align: center;
+            margin-top: 0.25rem; min-height: 1.2em; letter-spacing: -0.01em;
+        }
+        #viewer { flex: 1; background: #030712; touch-action: none; position: relative; overflow: hidden; }
+        #viewer.snapping { cursor: cell; }
+        
+        .history-group { display: flex; gap: 0.2rem; margin-left: 0.2rem; border-left: 1px solid #334155; padding-left: 0.4rem; }
+        .separator { width: 1px; height: 20px; background: #334155; margin: 0 0.15rem; }
+        
+        .fallback-link {
+            position: fixed; bottom: 10px; right: 10px; background: #1e293b; padding: 6px 12px;
+            border-radius: 8px; font-size: 0.7rem; z-index: 100; display: none; gap: 8px;
+            border: 1px solid #475569; color: #eef2ff; align-items: center;
+        }
+        .fallback-link a { color: #93c5fd; text-decoration: underline; cursor: pointer; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <button class="btn primary" onclick="document.getElementById('file-input').click()">📁 Open GLB</button>
+        <input type="file" id="file-input" accept=".glb,.gltf">
+
+        <button class="btn active" id="btn-camera" onclick="setMode('camera')">🎥 Camera</button>
+        <button class="btn" id="btn-snap" onclick="setMode('snap')">🧲 Snap</button>
+
+        <span class="separator"></span>
+        <button class="btn smooth-btn" id="btn-smooth" disabled>🧹 Smooth</button>
+        <div class="slider-group"><label>Str</label><input type="range" id="smooth-strength" min="0.05" max="1.0" step="0.05" value="0.4"></div>
+        <div class="slider-group"><label>Pass</label><input type="range" id="smooth-iters" min="1" max="8" step="1" value="1"></div>
+
+        <span class="separator"></span>
+        <div class="history-group">
+            <button class="btn" id="btn-undo" disabled>↩️</button>
+            <button class="btn" id="btn-redo" disabled>↪️</button>
+        </div>
+
+        <div class="tool-panel" id="ui-snap">
+            <div class="slider-group"><label>Radius</label><input type="range" id="snap-radius" min="0.05" max="1.0" step="0.05" value="0.3"></div>
+            <button class="btn" id="btn-clear-snap">❌ Cancel</button>
+        </div>
+
+        <button class="btn export-btn" id="generate-btn" style="display:none;">⚙️ Generate GLB</button>
+<button class="btn export-btn" id="download-btn" style="display:none;" disabled>💾 Download GLB</button>
+        <div class="status" id="status-msg">No model loaded — open a .glb file</div>
+    </div>
+    
+    <div id="viewer"></div>
+    
+    <div id="fallback-panel" class="fallback-link">
+        <span>⬇️ Tap to save: </span>
+        <a id="manual-download-link" href="#">model.glb</a>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.150.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.150.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+        // --- UI Elements ---
+        const viewer = document.getElementById('viewer');
+        const statusMsg = document.getElementById('status-msg');
+        const downloadBtn = document.getElementById('download-btn');
+const generateBtn = document.getElementById('generate-btn');
+        const fallbackPanel = document.getElementById('fallback-panel');
+        const manualLink = document.getElementById('manual-download-link');
+
+        // --- Core Scene ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x030712);
+        const camera = new THREE.PerspectiveCamera(45, viewer.clientWidth / viewer.clientHeight, 0.1, 100);
+        camera.position.set(3, 2.5, 4.5);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+        renderer.setSize(viewer.clientWidth, viewer.clientHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        viewer.appendChild(renderer.domElement);
+        
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        scene.add(new THREE.AmbientLight(0x3a4466, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xfff5e0, 1.2);
+        dirLight.position.set(2.5, 3.5, 2);
+        scene.add(dirLight);
+
+        // --- State ---
+        window.currentMode = 'camera';
+        const MAX_HISTORY = 40;
+        let undoStack = [], redoStack = [];
+        let snapTargetA = null;
+        let editableMeshes = [], currentModel = null, currentFileName = 'model';
+let generatedBlob=null, generatedFilename=null;
+        const neighborMapCache = new Map();
+
+        // Target Marker for Snap Tool
+        const markerGeo = new THREE.SphereGeometry(0.03, 16, 16);
+        const markerMat = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
+        const targetMarker = new THREE.Mesh(markerGeo, markerMat);
+        targetMarker.renderOrder = 999;
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // --- Undo / Redo System ---
+        function getGeometryState() { 
+            return editableMeshes.map(m => new Float32Array(m.geometry.attributes.position.array)); 
+        }
+        function applyGeometryState(stateArray) {
+            for (let i = 0; i < editableMeshes.length; i++) {
+                const m = editableMeshes[i];
+                if (!stateArray[i] || m.geometry.attributes.position.array.length !== stateArray[i].length) continue;
+                m.geometry.attributes.position.array.set(stateArray[i]);
+                m.geometry.attributes.position.needsUpdate = true;
+                m.geometry.computeVertexNormals();
+                neighborMapCache.delete(m.uuid);
+            }
+        }
+        function updateHistoryUI() {
+            document.getElementById('btn-undo').disabled = undoStack.length === 0;
+            document.getElementById('btn-redo').disabled = redoStack.length === 0;
+        }
+        document.getElementById('btn-undo').addEventListener('click', () => {
+            if (undoStack.length === 0) return;
+            redoStack.push(getGeometryState());
+            applyGeometryState(undoStack.pop());
+            updateHistoryUI();
+            statusMsg.textContent = '↩️ Undo';
+        });
+        document.getElementById('btn-redo').addEventListener('click', () => {
+            if (redoStack.length === 0) return;
+            undoStack.push(getGeometryState());
+            applyGeometryState(redoStack.pop());
+            updateHistoryUI();
+            statusMsg.textContent = '↪️ Redo';
+        });
+
+        // --- Mode Management ---
+        window.setMode = function(mode) {
+            window.currentMode = mode;
+            controls.enabled = mode === 'camera';
+            ['btn-camera', 'btn-snap'].forEach(id => document.getElementById(id).classList.remove('active'));
+            document.getElementById('ui-snap').style.display = 'none';
+            viewer.className = '';
+            
+            if (mode === 'camera') { 
+                document.getElementById('btn-camera').classList.add('active'); 
+                statusMsg.textContent = '🎥 Camera'; 
+            } else if (mode === 'snap') { 
+                document.getElementById('btn-snap').classList.add('active'); 
+                document.getElementById('ui-snap').style.display = 'flex'; 
+                viewer.classList.add('snapping'); 
+                statusMsg.textContent = '🧲 Snap Tool: Click to set target, click again to snap.'; 
+            }
+            if (mode !== 'snap') clearSnap();
+        };
+
+        function clearSnap() { 
+            snapTargetA = null; 
+            scene.remove(targetMarker); 
+        }
+        document.getElementById('btn-clear-snap').addEventListener('click', clearSnap);
+
+        // --- Snapping Logic ---
+        function handleSnapTool(intersect) {
+            const mesh = intersect.object, geo = mesh.geometry;
+            if (!geo.attributes.position) return;
+            
+            // 1st click: Set target
+            if (!snapTargetA) {
+                snapTargetA = intersect.point.clone();
+                scene.add(targetMarker); targetMarker.position.copy(snapTargetA);
+                statusMsg.textContent = '🎯 Target set. Click area to snap.'; 
+                return;
+            }
+            
+            // 2nd click: Snap area to target
+            const src = intersect.point.clone();
+            const radius = parseFloat(document.getElementById('snap-radius').value);
+            const localTgt = mesh.worldToLocal(snapTargetA.clone());
+            const localSrc = mesh.worldToLocal(src.clone());
+            const move = new THREE.Vector3().subVectors(localTgt, localSrc);
+            const pos = geo.attributes.position.array;
+            
+            const before = getGeometryState();
+            let changed = false;
+            
+            for (let i = 0; i < pos.length; i += 3) {
+                const d = Math.hypot(pos[i] - localSrc.x, pos[i+1] - localSrc.y, pos[i+2] - localSrc.z);
+                if (d < radius) { 
+                    const f = 1 - d / radius; 
+                    pos[i] += move.x * f; 
+                    pos[i+1] += move.y * f; 
+                    pos[i+2] += move.z * f; 
+                    changed = true; 
+                }
+            }
+            
+            if (changed) {
+                geo.attributes.position.needsUpdate = true; 
+                geo.computeVertexNormals(); 
+                neighborMapCache.delete(mesh.uuid);
+                undoStack.push(before); 
+                if (undoStack.length > MAX_HISTORY) undoStack.shift(); 
+                redoStack = []; 
+                updateHistoryUI();
+                statusMsg.textContent = '💥 Snapped';
+            }
+            clearSnap();
+        }
+
+        // --- Smoothing Logic ---
+        function buildNeighborMap(geo) { 
+            const idx = geo.index; 
+            const map = new Map(); 
+            const vc = geo.attributes.position.count; 
+            for(let i = 0; i < vc; i++) map.set(i, new Set()); 
+            
+            if(idx) { 
+                const arr = idx.array; 
+                for(let t = 0; t < arr.length; t += 3){ 
+                    const a = arr[t], b = arr[t+1], c = arr[t+2]; 
+                    map.get(a).add(b); map.get(a).add(c);
+                    map.get(b).add(a); map.get(b).add(c);
+                    map.get(c).add(a); map.get(c).add(b);
+                } 
+            } else { 
+                const pos = geo.attributes.position.array; 
+                const keyMap = new Map(); 
+                const idxKey = new Array(vc); 
+                for(let i = 0; i < vc; i++){ 
+                    const k = `${pos[i*3].toFixed(5)},${pos[i*3+1].toFixed(5)},${pos[i*3+2].toFixed(5)}`; 
+                    if(!keyMap.has(k)) keyMap.set(k, []); 
+                    keyMap.get(k).push(i); 
+                    idxKey[i] = k; 
+                } 
+                for(let t = 0; t < Math.floor(vc/3); t++){ 
+                    const a = t*3, b = t*3+1, c = t*3+2; 
+                    const ka = idxKey[a], kb = idxKey[b], kc = idxKey[c]; 
+                    if(!ka || !kb || !kc) continue; 
+                    const allA = keyMap.get(ka), allB = keyMap.get(kb), allC = keyMap.get(kc); 
+                    for(const ia of allA) for(const ib of allB) if(ia !== ib) { map.get(ia).add(ib); map.get(ib).add(ia); } 
+                    for(const ia of allA) for(const ic of allC) if(ia !== ic) { map.get(ia).add(ic); map.get(ic).add(ia); } 
+                    for(const ib of allB) for(const ic of allC) if(ib !== ic) { map.get(ib).add(ic); map.get(ic).add(ib); } 
+                } 
+            } 
+            const res = new Map(); 
+            for(const [i, s] of map) res.set(i, Array.from(s)); 
+            return res; 
+        }
+        function getNeighborMap(mesh) { 
+            if(neighborMapCache.has(mesh.uuid)) return neighborMapCache.get(mesh.uuid); 
+            const nm = buildNeighborMap(mesh.geometry); 
+            neighborMapCache.set(mesh.uuid, nm); 
+            return nm; 
+        }
+        function smoothAllMeshes(strength, iters) { 
+            if(!editableMeshes.length) return false; 
+            let any = false; 
+            for(let iter = 0; iter < iters; iter++) { 
+                for(const mesh of editableMeshes) { 
+                    const geo = mesh.geometry; 
+                    if(!geo.attributes.position) continue; 
+                    const pos = geo.attributes.position.array, nm = getNeighborMap(mesh); 
+                    const newPos = new Float32Array(pos.length); 
+                    let changed = false; 
+                    for(let i = 0; i < geo.attributes.position.count; i++) { 
+                        const nbrs = nm.get(i); 
+                        if(!nbrs || nbrs.length === 0){ 
+                            newPos[i*3] = pos[i*3]; newPos[i*3+1] = pos[i*3+1]; newPos[i*3+2] = pos[i*3+2]; 
+                            continue; 
+                        } 
+                        let cx = 0, cy = 0, cz = 0; 
+                        for(const n of nbrs){ cx += pos[n*3]; cy += pos[n*3+1]; cz += pos[n*3+2]; } 
+                        cx /= nbrs.length; cy /= nbrs.length; cz /= nbrs.length; 
+                        newPos[i*3] = pos[i*3] + strength * (cx - pos[i*3]); 
+                        newPos[i*3+1] = pos[i*3+1] + strength * (cy - pos[i*3+1]); 
+                        newPos[i*3+2] = pos[i*3+2] + strength * (cz - pos[i*3+2]); 
+                        if(Math.abs(newPos[i*3] - pos[i*3]) > 1e-8) changed = true; 
+                    } 
+                    if(changed) { 
+                        geo.attributes.position.array.set(newPos); 
+                        geo.attributes.position.needsUpdate = true; 
+                        geo.computeVertexNormals(); 
+                        any = true; 
+                    } 
+                } 
+                if(iter < iters - 1) for(const m of editableMeshes) neighborMapCache.delete(m.uuid); 
+            } 
+            for(const m of editableMeshes) neighborMapCache.delete(m.uuid); 
+            return any; 
+        }
+
+        document.getElementById('btn-smooth').addEventListener('click', () => { 
+            if(!editableMeshes.length) return; 
+            const s = parseFloat(document.getElementById('smooth-strength').value);
+            const i = parseInt(document.getElementById('smooth-iters').value) || 1; 
+            const before = getGeometryState(); 
+            if (smoothAllMeshes(s, i)) { 
+                undoStack.push(before); 
+                if(undoStack.length > MAX_HISTORY) undoStack.shift(); 
+                redoStack = []; 
+                updateHistoryUI(); 
+                statusMsg.textContent = '✨ Smoothed'; 
+            } else {
+                statusMsg.textContent = 'No change'; 
+            }
+        });
+
+        // --- Export & Download Logic (FIXED) ---
+        function prepareModelForExport(model) {
+            const cloned = model.clone(true);
+            cloned.traverse(child => {
+                if(child.isMesh && child.geometry) {
+                    if(!child.geometry.attributes.normal) child.geometry.computeVertexNormals();
+                    if(!child.geometry.attributes.uv) {
+                        const uvArr = new Float32Array(child.geometry.attributes.position.count * 2);
+                        child.geometry.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+                    }
+                    child.updateMatrix();
+                }
+            });
+            return cloned;
+        }
+
+        async function exportToGLBBlob(model) {
+            return new Promise((resolve, reject) => {
+                const exporter = new GLTFExporter();
+                const prepared = prepareModelForExport(model);
+                exporter.parse(prepared, (result) => {
+                    if(result instanceof ArrayBuffer) {
+                        resolve(new Blob([result], { type: 'application/octet-stream' }));
+                    } else {
+                        reject(new Error('GLTFExporter did not return binary ArrayBuffer'));
+                    }
+                }, (error) => reject(error), { binary: true });
+            });
+        }
+
+        function downloadWithAnchor(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            
+            // Dispatch standard MouseEvent to bypass transient activation blocks
+            a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            
+            // Clean up cleanly
+            setTimeout(() => {
+                document.body.removeChild(a);
+            }, 100);
+            
+            return url;
+        }
+
+        downloadBtn.addEventListener('click', async () => {
+            if (!currentModel) { statusMsg.textContent = '⚠️ No model to export.'; return; }
+            statusMsg.textContent = '📦 Generating GLB file ...';
+            downloadBtn.disabled = true;
+            fallbackPanel.style.display = 'none';
+            
+            try {
+                const blob = await exportToGLBBlob(currentModel);
+                if (!blob || blob.size < 100) throw new Error('Empty GLB blob');
+                const filename = `${currentFileName}_edited.glb`;
+
+                // 1. Try automatic download
+                const blobUrl = downloadWithAnchor(blob, filename);
+
+                // 2. Set up manual fallback (NO target="_blank")
+                manualLink.href = blobUrl;
+                manualLink.download = filename;
+                manualLink.textContent = filename;
+                manualLink.target = ''; // Keep inside current window context
+                fallbackPanel.style.display = 'flex';
+                statusMsg.textContent = `✅ GLB ready (${(blob.size/1024).toFixed(1)} KB). Tap link if it didn't start.`;
+
+                // Clean up after 2 mins
+                setTimeout(() => {
+                    URL.revokeObjectURL(blobUrl);
+                    fallbackPanel.style.display = 'none';
+                }, 120000);
+            } catch (err) {
+                console.error(err);
+                statusMsg.textContent = `❌ Export failed: ${err.message}.`;
+            } finally {
+                downloadBtn.disabled = false;
+            }
+        });
+
+        
+generateBtn?.addEventListener('click', async () => {
+    if (!currentModel) {
+        statusMsg.textContent = '⚠️ No model loaded';
+        return;
+    }
+    try {
+        statusMsg.textContent = '📦 Generating GLB...';
+        generatedBlob = await exportToGLBBlob(currentModel);
+        generatedFilename = `${currentFileName}_edited.glb`;
+        downloadBtn.disabled = false;
+        statusMsg.textContent = `✅ GLB Generated (${(generatedBlob.size/1024).toFixed(1)} KB)`;
+    } catch(err) {
+        console.error(err);
+        statusMsg.textContent = '❌ Generate failed';
+    }
+});
+
+downloadBtn.addEventListener('click', () => {
+    if(!generatedBlob){
+        statusMsg.textContent = '⚠️ Generate GLB first';
+        return;
+    }
+    const url = URL.createObjectURL(generatedBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = generatedFilename || 'model.glb';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    manualLink.href = url;
+    manualLink.download = generatedFilename || 'model.glb';
+    fallbackPanel.style.display = 'flex';
+});
+
+
+// --- GLTF Loader ---
+        const loader = new GLTFLoader();
+        document.getElementById('file-input').addEventListener('change', e => {
+            const file = e.target.files[0];
+            if(!file) return;
+            currentFileName = file.name.replace(/\.[^/.]+$/, '');
+            const url = URL.createObjectURL(file);
+            statusMsg.textContent = 'Loading...';
+            
+            loader.load(url, gltf => {
+                if(currentModel) scene.remove(currentModel);
+                undoStack = []; redoStack = []; updateHistoryUI(); 
+                neighborMapCache.clear(); editableMeshes = [];
+                
+                currentModel = gltf.scene;
+                currentModel.scale.set(1,1,1);
+                currentModel.traverse(c => { 
+                    if(c.isMesh) { c.material.transparent = false; editableMeshes.push(c); } 
+                });
+                
+                scene.add(currentModel);
+                const box = new THREE.Box3().setFromObject(currentModel);
+                const center = box.getCenter(new THREE.Vector3());
+                camera.position.set(center.x+1.5, center.y+1.2, center.z+2.5);
+                controls.target.copy(center); 
+                controls.update();
+                
+                document.getElementById('btn-smooth').disabled = false;
+                generateBtn.style.display='inline-block';
+downloadBtn.style.display='inline-block';
+downloadBtn.disabled=true;
+generatedBlob=null;
+                statusMsg.textContent = `✅ Loaded ${editableMeshes.length} mesh(es). Ready.`;
+                URL.revokeObjectURL(url);
+            }, undefined, err => { 
+                statusMsg.textContent = '❌ Load failed'; 
+                console.error(err); 
+                URL.revokeObjectURL(url); 
+            });
+        });
+
+        // --- Pointer Events (Snapping interactions) ---
+        viewer.addEventListener('pointerdown', e => {
+            if(window.currentMode !== 'snap') return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left)/rect.width)*2-1;
+            mouse.y = -((e.clientY - rect.top)/rect.height)*2+1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const hits = raycaster.intersectObjects(editableMeshes);
+            
+            if(hits.length) { 
+                handleSnapTool(hits[0]); 
+            } else {
+                clearSnap();
+            }
+        });
+
+        // --- Window Resize & Render Loop ---
+        window.addEventListener('resize', () => { 
+            camera.aspect = viewer.clientWidth / viewer.clientHeight; 
+            camera.updateProjectionMatrix(); 
+            renderer.setSize(viewer.clientWidth, viewer.clientHeight); 
+        });
+        
+        function animate() { 
+            requestAnimationFrame(animate); 
+            if(window.currentMode === 'camera') controls.update(); 
+            renderer.render(scene, camera); 
+        }
+        
+        animate(); 
+        updateHistoryUI();
+        setMode('camera');
+    </script>
+</body>
+</html>
